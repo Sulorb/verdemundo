@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Verdemundo</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌿</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="app"></div>
+  <div id="labels"></div>
+  <div id="arrows"></div>
+  <div id="popups"></div>
+
+  <div id="hud" class="hidden">
+    <div id="board"></div>
+    <div id="top">
+      <div id="timer"></div>
+      <div id="pop"></div>
+      <div id="frenzy" class="hidden">🌸 PRIMAVERA ×2</div>
+      <div id="camoState" class="hidden"></div>
+    </div>
+    <div id="me">
+      <div id="score">0</div>
+      <div id="combo"></div>
+      <div id="mons">🏛️ 0</div>
+      <div id="missions"></div>
+    </div>
+    <div id="team" class="hidden"><div id="teamList"></div><button id="teamLeave">Salir (Q)</button></div>
+    <div id="inviteBox" class="hidden"></div>
+    <div id="feed"></div>
+    <div id="bottom">
+      <div id="title">Bache</div>
+      <div id="bar"><div id="barFill"></div></div>
+      <div id="bombs"></div>
+      <div id="hint">Mouse: crecer hacia · Clic/Espacio: incendio 🔥 · Shift/clic der.: turbo · E: raíces 🌱 · T: alianza 🤝</div>
+    </div>
+    <div id="mobileBtns">
+      <button id="btnTeam">🤝</button>
+      <button id="btnCamo">🌱</button>
+      <button id="btnBoost">⚡</button>
+      <button id="btnBomb">🔥</button>
+    </div>
+  </div>
+  <div id="joy"><div id="knob"></div></div>
+  <div id="banner"></div>
+
+  <div id="start" class="overlay">
+    <div class="card">
+      <h1>VERDE<span>MUNDO</span></h1>
+      <p class="sub">Sos una selva. El planeta entero va a reverdecer.</p>
+      <input id="name" maxlength="14" placeholder="Tu nombre" />
+      <select id="city"></select>
+      <button id="play" class="big">¡A CRECER!</button>
+      <ul class="rules">
+        <li>🪴 Nacés como un brote en una maceta: cubrí los muebles, rompé las paredes con raíces y salí.</li>
+        <li>🌆 Todo lo que cubrís se vuelve selva: gente, carros, casas, rascacielos… y monumentos reales.</li>
+        <li>🌳 Absorbé selvas más chicas. Más grande = más lenta. Las gigantes se secan.</li>
+        <li>🔥 Juntá chispas y prendé incendios: queman a las grandes según tu tamaño y sueltan semillas.</li>
+        <li>🤝 Alianzas de hasta 3: no se absorben entre ustedes y si rodean juntas a una gigante, 🌿 la enredan.</li>
+        <li>🌱 Raíces: te escondés bajo tierra 30 s; al brotar hay 8 s de aviso y lo que no salga, adentro.</li>
+        <li>✅ Misiones, 🌸 primavera, ⛈️ tormentas. El mundo nunca se acaba.</li>
+      </ul>
+      <div id="records"></div>
+    </div>
+  </div>
+
+  <div id="dead" class="overlay hidden">
+    <div class="card">
+      <h2>¡Te absorbió <span id="killer"></span>!</h2>
+      <p id="deadStats"></p>
+      <button id="reviveMate" class="big mate hidden">Brotar con tu alianza</button>
+      <button id="revive" class="big">Brotar de nuevo</button>
+      <p class="sub">Espacio para brotar de nuevo.</p>
+    </div>
+  </div>
+
+  <div id="loading" class="overlay"><div class="card"><h2>Sembrando el planeta…</h2></div></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
