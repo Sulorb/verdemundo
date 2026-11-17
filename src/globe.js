@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { R, maskCanvas } from './geo.js';
+import { tex as terrTex, palette, TW, TH } from './territory.js';
 
 export const MAX_HOLES = 24;
 
@@ -17,6 +18,8 @@ export function createGlobe(scene) {
 
   const uniforms = {
     map: { value: tex },
+    terr: { value: terrTex },
+    pal: { value: palette },
     holes: { value: holes },
     holeCol: { value: holeCol },
     holeFx: { value: holeFx },
@@ -37,6 +40,8 @@ export function createGlobe(scene) {
       #define PI 3.14159265
       #define MAXH ${MAX_HOLES}
       uniform sampler2D map;
+      uniform sampler2D terr;
+      uniform sampler2D pal;
       uniform vec4 holes[MAXH];
       uniform vec3 holeCol[MAXH];
       uniform vec2 holeFx[MAXH];
@@ -73,6 +78,31 @@ export function createGlobe(scene) {
         float des = smoothstep(10.0,18.0,alat)*(1.0-smoothstep(30.0,38.0,alat))*smoothstep(0.42,0.6,n2);
         lc = mix(lc, desert, des);
         lc = mix(lc, snow, smoothstep(60.0,68.0,alat + n*8.0));
+        // territorio de las selvas
+        vec2 tx = vec2(1.0/${TW}.0, 1.0/${TH}.0);
+        vec2 tuv = uv + (vec2(noise(p*300.0), noise(p*300.0+7.0)) - 0.5) * tx * 1.3;
+        float ow = floor(texture2D(terr, tuv).r * 255.0 + 0.5);
+        if (ow > 253.5) {
+          float f = 0.5 + 0.5*sin(time*16.0 + noise(p*400.0)*20.0);
+          lc = mix(vec3(1.0,0.32,0.04), vec3(1.0,0.86,0.25), f) * (1.3 + 0.5*noise(p*900.0 + time*3.0));
+        } else if (ow > 252.5) {
+          lc = mix(vec3(0.12,0.11,0.10), vec3(0.28,0.25,0.22), noise(p*700.0));
+        } else if (ow > 0.5) {
+          vec3 oc = texture2D(pal, vec2((ow+0.5)/256.0, 0.5)).rgb;
+          float a1 = noise(p*520.0), a2 = noise(p*2100.0);
+          vec3 jg = mix(vec3(0.04,0.27,0.07), vec3(0.18,0.55,0.13), a1);
+          jg = mix(jg, vec3(0.36,0.74,0.22), smoothstep(0.62,0.9,a2)*0.6);
+          jg = mix(jg, oc, 0.10);
+          float fl = smoothstep(0.84,0.88, noise(p*1500.0 + ow*3.1));
+          jg = mix(jg, oc, fl*0.85);
+          float e = 0.0;
+          e += step(0.5, abs(floor(texture2D(terr, tuv+vec2(tx.x*0.6,0.0)).r*255.0+0.5) - ow));
+          e += step(0.5, abs(floor(texture2D(terr, tuv-vec2(tx.x*0.6,0.0)).r*255.0+0.5) - ow));
+          e += step(0.5, abs(floor(texture2D(terr, tuv+vec2(0.0,tx.y*0.6)).r*255.0+0.5) - ow));
+          e += step(0.5, abs(floor(texture2D(terr, tuv-vec2(0.0,tx.y*0.6)).r*255.0+0.5) - ow));
+          jg = mix(jg, oc, min(1.0, e)*0.6);
+          lc = jg;
+        }
         vec3 col = mix(ocean, lc, land);
         // playa
         col = mix(col, vec3(0.93,0.86,0.62), land*(1.0-smoothstep(0.55,0.75,coast))*0.0);
@@ -101,7 +131,7 @@ export function createGlobe(scene) {
             jungle = mix(jungle, holeCol[i], fl * 0.95);
             jungle *= 0.72 + 0.38 * t;
             jungle = mix(jungle, vec3(0.02,0.12,0.03), smoothstep(0.82,1.0,t) * 0.55);
-            col = mix(col, jungle * (0.55 + 0.6 * diff), al);
+            col = mix(col, jungle * (0.55 + 0.6 * diff), al * 0.7);
             if (warn > 0.0 && t > 0.93) col = mix(col, vec3(1.0,0.15,0.1), pulse*0.8);
           } else if (t < 1.10) {
             float k = 1.0 - (t-1.0)/0.10;

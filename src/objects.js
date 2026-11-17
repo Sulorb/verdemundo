@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { R, R0, CITIES, LANDMARKS, latLonToVec, vecToLatLon, isLand, randomLand, randomCoastalOcean, offsetPoint, surfDist, tangentize } from './geo.js';
+import { idxOf } from './territory.js';
 
 // ---------- Geometrías (huella radio ~1, base en y=0) ----------
 function colored(geo, hex) {
@@ -64,16 +65,57 @@ function geoGold() {
   // gota de agua
   return mergeGeometries([colored(at(new THREE.SphereGeometry(0.6, 12, 10), 0, 0.9, 0), 0x4fc3f7), colored(at(new THREE.ConeGeometry(0.42, 0.9, 12), 0, 1.75, 0), 0x4fc3f7)]);
 }
-function geoBomb() {
-  // chispa / brasa
+function geoSeed() {
+  // semilla de ceiba: bellota con brote
+  const nut = new THREE.SphereGeometry(0.62, 10, 8); nut.scale(1, 1.25, 1);
+  const cap = new THREE.SphereGeometry(0.66, 10, 5, 0, Math.PI * 2, 0, Math.PI / 2);
+  const leaf = new THREE.SphereGeometry(0.35, 6, 4); leaf.scale(1.6, 0.25, 0.7);
   return mergeGeometries([
-    colored(at(new THREE.ConeGeometry(0.7, 1.8, 7), 0, 0.9, 0), 0xff5a1a),
-    colored(at(new THREE.ConeGeometry(0.4, 1.2, 7), 0, 0.75, 0.15), 0xffd23a),
-    colored(at(new THREE.DodecahedronGeometry(0.45, 0), 0, 0.3, 0), 0x3b2a20),
+    colored(at(nut, 0, 0.85, 0), 0xb5651d),
+    colored(at(cap, 0, 1.2, 0), 0x6b3e1c),
+    colored(at(new THREE.CylinderGeometry(0.05, 0.07, 0.6, 5), 0, 2.0, 0), 0x4e8a2a),
+    colored(at(leaf.clone(), 0.42, 2.25, 0), 0x6ad13a),
+    colored(at(leaf.rotateY(Math.PI), -0.42, 2.15, 0), 0x58c22d),
   ]);
 }
-function geoDebris() {
-  return colored(at(new THREE.IcosahedronGeometry(0.7, 0), 0, 0.6, 0), 0xffffff);
+/** Enredaderas que cubren lo que la selva conquista (alto normalizado a 1) */
+function geoVines() {
+  const parts = [];
+  const shades = [0x2f8f2a, 0x3fae36, 0x23701f, 0x52c242];
+  for (let i = 0; i < 16; i++) {
+    const a = i * 2.39, y = 0.08 + (i / 16) * 0.92, rr = 0.78 + (i % 3) * 0.08;
+    const b = new THREE.IcosahedronGeometry(0.2 + (i % 4) * 0.05, 0); b.scale(1, 0.8, 1);
+    parts.push(colored(at(b, Math.cos(a) * rr, y, Math.sin(a) * rr), shades[i % 4]));
+  }
+  for (let i = 0; i < 5; i++) {
+    const a = i * 1.26;
+    parts.push(colored(at(new THREE.IcosahedronGeometry(0.34, 0), Math.cos(a) * 0.45, 1.0, Math.sin(a) * 0.45), shades[(i + 1) % 4]));
+  }
+  parts.push(colored(at(new THREE.IcosahedronGeometry(0.42, 0), 0, 1.08, 0), 0x3fae36));
+  return mergeGeometries(parts);
+}
+export function geoTruck() {
+  // topadora de leñador: cuerpo amarillo, cabina, oruga y cuchilla
+  return mergeGeometries([
+    colored(at(new THREE.BoxGeometry(1.2, 0.55, 1.9), 0, 0.5, 0), 0xffc107),
+    colored(at(new THREE.BoxGeometry(0.9, 0.65, 0.8), 0, 1.1, -0.35), 0xffd54f),
+    colored(at(new THREE.BoxGeometry(0.8, 0.4, 0.05), 0, 1.15, 0.06), 0x90caf9),
+    colored(at(new THREE.BoxGeometry(0.3, 0.42, 2.0), -0.58, 0.2, 0), 0x333333),
+    colored(at(new THREE.BoxGeometry(0.3, 0.42, 2.0), 0.58, 0.2, 0), 0x333333),
+    colored(at(new THREE.BoxGeometry(1.6, 0.6, 0.15), 0, 0.35, 1.15), 0x9e9e9e),
+    colored(at(new THREE.CylinderGeometry(0.07, 0.07, 0.6, 5), 0.35, 1.5, -0.6), 0x555555),
+  ]);
+}
+export function geoSapling() {
+  // brote plantado: tronquito, copa y flores (el color lo pone la instancia)
+  const flowers = [];
+  for (let i = 0; i < 6; i++) { const a = i * 1.05; flowers.push(colored(at(new THREE.IcosahedronGeometry(0.14, 0), Math.cos(a) * 0.55, 1.5 + (i % 2) * 0.25, Math.sin(a) * 0.55), 0xffffff)); }
+  return mergeGeometries([
+    colored(at(new THREE.CylinderGeometry(0.09, 0.14, 1.0, 5), 0, 0.5, 0), 0x8d6e63),
+    colored(at(new THREE.IcosahedronGeometry(0.62, 0), 0, 1.45, 0), 0x66bb6a),
+    colored(at(new THREE.IcosahedronGeometry(0.45, 0), 0.25, 1.85, 0.1), 0x81c784),
+    ...flowers,
+  ]);
 }
 
 // ---- cositas chiquitas (adentro de la casa y en la calle) ----
@@ -182,15 +224,16 @@ export const KINDS = {
   tower: { s: 2.0, geo: geoTower, cap: 760, colors: [0x6fa8dc, 0x9fc5e8, 0x7f8c9a, 0xb4c7d6, 0x5d7b96] },
   boat: { s: 0.55, geo: geoBoat, cap: 650, colors: [0xffffff, 0xff7043, 0x4fc3f7] },
   gold: { s: 0.5, geo: geoGold, cap: 300, colors: [0xffffff], emissive: 0x0a3a5a },
-  bomb: { s: 0.45, geo: geoBomb, cap: 240, colors: [0xffffff], emissive: 0x8a2a00 },
-  debris: { s: 0.4, geo: geoDebris, cap: 900, colors: [0xa1887f, 0x8d6e63, 0xc5e1a5, 0xffcc80], emissive: 0x1a2a00 },
+  seed: { s: 0.45, geo: geoSeed, cap: 320, colors: [0xffffff], emissive: 0x2a1500 },
 };
 for (const k in KINDS) KINDS[k].cap = Math.round(KINDS[k].cap * CAPK);
 
 const CELL = 3; // grados
 const ROWS = 180 / CELL, COLS = 360 / CELL;
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3();
-const _col = new THREE.Color();
+const _col = new THREE.Color(), _col2 = new THREE.Color();
+const GREEN = new THREE.Color(0x3f9b35);
+export const VINE_CAP = MOBILE ? 2500 : 6000;
 const _Y = new THREE.Vector3(0, 1, 0), _ax = new THREE.Vector3(), _v = new THREE.Vector3();
 
 export class World {
@@ -208,7 +251,8 @@ export class World {
 
     for (const [k, def] of Object.entries(KINDS)) {
       const mat = new THREE.MeshLambertMaterial({ vertexColors: true, emissive: def.emissive || 0x000000 });
-      const mesh = new THREE.InstancedMesh(def.geo(), mat, def.cap);
+      const geo = def.geo(); geo.computeBoundingBox(); def.h = geo.boundingBox.max.y;
+      const mesh = new THREE.InstancedMesh(geo, mat, def.cap);
       mesh.frustumCulled = false;
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       _m.makeScale(0, 0, 0);
@@ -221,6 +265,73 @@ export class World {
       this.meshes[k] = mesh;
       this.free[k] = []; this.count[k] = 0; this.hi[k] = 0; mesh.count = 0;
       for (let i = def.cap - 1; i >= 0; i--) this.free[k].push(i);
+    }
+    this.vines = new THREE.InstancedMesh(geoVines(), new THREE.MeshLambertMaterial({ vertexColors: true }), VINE_CAP);
+    this.vines.frustumCulled = false; this.vines.count = 0;
+    _m.makeScale(0, 0, 0);
+    for (let i = 0; i < VINE_CAP; i++) { this.vines.setMatrixAt(i, _m); this.vines.setColorAt(i, _col.setHex(0xffffff)); }
+    scene.add(this.vines);
+    this.vineFree = []; for (let i = VINE_CAP - 1; i >= 0; i--) this.vineFree.push(i);
+    this.vineHi = 0;
+    this.partial = new Set();
+  }
+
+  // ---------- enredar ----------
+  /** Avance del enredo (0..1): el objeto se pone verde de a poco */
+  progress(o, k) {
+    this.partial.add(o);
+    this.paintColor(o, k * 0.85);
+  }
+  paintColor(o, k) {
+    if (o.landmark) { o.mesh.material.color.copy(_col.setHex(0xffffff).lerp(GREEN, k)); return; }
+    const def = KINDS[o.kind], mesh = this.meshes[o.kind];
+    _col.setHex(def.colors[o.inst % def.colors.length]).lerp(GREEN, k);
+    mesh.setColorAt(o.inst, _col);
+    mesh.instanceColor.needsUpdate = true;
+  }
+  /** La selva `h` se queda con el objeto: verde y con enredaderas de su color */
+  overgrow(o, h) {
+    this.partial.delete(o);
+    o.over = true; o.owner = h; o.ep = h.ep; o.prog = 0;
+    this.paintColor(o, 1);
+    if (o.vine === undefined || o.vine < 0) {
+      const v = this.vineFree.pop();
+      o.vine = v === undefined ? -1 : v;
+      if (v !== undefined && v + 1 > this.vineHi) { this.vineHi = v + 1; this.vines.count = this.vineHi; }
+    }
+    if (o.vine >= 0) {
+      const hh = o.landmark ? o.vh : KINDS[o.kind].h;
+      _q.setFromUnitVectors(_Y, o.pos).multiply(_q2.setFromAxisAngle(_Y, o.yaw + 1.3));
+      _m.compose(_p.copy(o.pos).multiplyScalar(R), _q, _s.set(o.s * 1.12, o.s * hh * 1.02, o.s * 1.12));
+      this.vines.setMatrixAt(o.vine, _m);
+      this.vines.instanceMatrix.needsUpdate = true;
+      this.vines.setColorAt(o.vine, _col.setHex(0xffffff).lerp(h.color, 0.4));
+      this.vines.instanceColor.needsUpdate = true;
+    }
+  }
+  /** Vuelve a ser salvaje (la tierra quedó libre o la tomó alguien que no le da el tamaño) */
+  unover(o) {
+    o.over = false; o.owner = null; o.prog = 0;
+    this.paintColor(o, 0);
+    this.dropVine(o);
+  }
+  dropVine(o) {
+    if (o.vine >= 0) { _m.makeScale(0, 0, 0); this.vines.setMatrixAt(o.vine, _m); this.vines.instanceMatrix.needsUpdate = true; this.vineFree.push(o.vine); }
+    o.vine = -1;
+  }
+  recolorVine(o) {
+    if (o.vine >= 0) { this.vines.setColorAt(o.vine, _col.setHex(0xffffff).lerp(o.owner.color, 0.4)); this.vines.instanceColor.needsUpdate = true; }
+  }
+  /** Saca objetos del mundo para siempre (muebles de una casa abandonada) */
+  removeObjs(list) {
+    for (const o of list) {
+      if (o.removed) continue;
+      o.removed = true;
+      if (o.alive) { o.alive = false; this.removeFromGrid(o); }
+      this.partial.delete(o);
+      this.dropVine(o); o.over = false;
+      this.writeMatrix(o);
+      this.release(o);
     }
   }
 
@@ -281,7 +392,8 @@ export class World {
     const inst = this.free[kind].pop();
     if (inst === undefined) return null;
     const s = def.s * (opts.scale ?? (0.85 + Math.random() * 0.35));
-    const o = { kind, s, pos: pos.clone().normalize(), yaw: opts.yaw ?? Math.random() * Math.PI * 2, g: def.g ?? 1, alive: true, inst, cell: -1, home: opts.home || null, pts: opts.pts ?? Math.ceil(s * s * 10), area: opts.area ?? null, respawn: opts.respawn ?? true };
+    const o = { kind, s, pos: pos.clone().normalize(), yaw: opts.yaw ?? Math.random() * Math.PI * 2, g: def.g ?? 1, alive: true, inst, cell: -1, home: opts.home || null, pts: opts.pts ?? Math.ceil(s * s * 10), area: opts.area ?? null, respawn: opts.respawn ?? true, over: false, owner: null, prog: 0, vine: -1 };
+    o.tidx = idxOf(o.pos);
     this.objs.push(o);
     this.tint(o, false);
     this.count[kind]++;
@@ -295,7 +407,9 @@ export class World {
     const mesh = new THREE.Mesh(geoLandmark(L.shape, L.color), new THREE.MeshLambertMaterial({ vertexColors: true }));
     this.scene.add(mesh);
     // brillo en la base para que se note desde lejos
-    const o = { kind: 'landmark', landmark: L, mesh, s: L.s, pos: L.pos.clone(), yaw: Math.random() * 6, alive: true, cell: -1, pts: Math.ceil(L.s * L.s * 25), respawn: true };
+    mesh.geometry.computeBoundingBox();
+    const o = { kind: 'landmark', landmark: L, mesh, s: L.s, pos: L.pos.clone(), yaw: Math.random() * 6, alive: true, cell: -1, pts: Math.ceil(L.s * L.s * 25), respawn: true, over: false, owner: null, prog: 0, vine: -1, vh: mesh.geometry.boundingBox.max.y, g: 1 };
+    o.tidx = idxOf(o.pos);
     this.objs.push(o); this.landmarkObjs.push(o);
     this.addToGrid(o); this.writeMatrix(o);
   }
@@ -326,7 +440,7 @@ export class World {
       for (let i = 0; i < 5; i++) { const q = offsetPoint(p, Math.random() * 1.5, Math.random() * 7); if (isLand(q)) this.spawn('palm', q, { home: 'tropic' }); }
     }
     for (let i = 0; i < Math.round(380 * CAPK); i++) this.spawn('boat', randomCoastalOcean(p), { home: 'sea' });
-    for (let i = 0; i < Math.round(130 * CAPK); i++) this.spawn('bomb', randomLand(p), { home: 'land', scale: 1, pts: 0 });
+    for (let i = 0; i < Math.round(160 * CAPK); i++) this.spawn('seed', randomLand(p), { home: 'land', scale: 1, pts: 0 });
     for (let i = 0; i < 40; i++) this.spawn('gold', randomLand(p), { home: 'land', scale: 1, pts: 60 });
     for (const L of LANDMARKS) this.spawnLandmark(L);
     for (const k in KINDS) this.base[k] = this.count[k];
@@ -424,13 +538,13 @@ export class World {
       if (!p) { r.at = now + 3; continue; }
       this.respawnQueue.splice(i, 1);
       const o = r.o;
-      o.pos.copy(p); o.alive = true; o.yaw = Math.random() * 7;
+      o.pos.copy(p); o.alive = true; o.yaw = Math.random() * 7; o.tidx = idxOf(o.pos);
       this.tint(o, false);
       this.addToGrid(o); this.writeMatrix(o);
       o.bornAt = now;
     }
     // girar oro, bombas y escombros para que brillen
-    const spinK = ['gold', 'bomb', 'debris'];
+    const spinK = ['gold', 'seed'];
     for (const o of this.objs) {
       if (!o.alive || o.landmark || !spinK.includes(o.kind)) continue;
       o.yaw += dt * 2.2;
@@ -455,30 +569,23 @@ export class World {
   /** Agrega objetos hasta la densidad que pide el tamaño actual del planeta */
   topUp(holes) {
     let budget = 120;
-    for (const k of ['tree', 'palm', 'car', 'house', 'building', 'tower', 'boat', 'bomb', 'gold', 'person', 'cone', 'bin', 'hydrant', 'bike', 'bench', 'dog']) {
+    for (const k of ['tree', 'palm', 'car', 'house', 'building', 'tower', 'boat', 'seed', 'gold', 'person', 'cone', 'bin', 'hydrant', 'bike', 'bench', 'dog']) {
       const want = Math.min(KINDS[k].cap, Math.round(this.base[k] * this.factor));
       while (this.count[k] < want && budget-- > 0) {
         const home = k === 'boat' ? 'sea' : k === 'palm' ? 'tropic' : ['car', 'building', 'tower', 'person', 'cone', 'bin', 'hydrant', 'bike', 'bench'].includes(k) ? CITIES[Math.floor(Math.random() * CITIES.length)] : 'land';
         const p = this.findSpawn({ kind: k, s: KINDS[k].s, home }, holes);
         if (!p) break;
-        this.spawn(k, p, { home, ...(k === 'bomb' ? { scale: 1, pts: 0 } : k === 'gold' ? { scale: 1, pts: 60 } : {}) });
+        this.spawn(k, p, { home, ...(k === 'seed' ? { scale: 1, pts: 0 } : k === 'gold' ? { scale: 1, pts: 60 } : {}) });
       }
     }
   }
 
-  /** Verde cuando la selva lo cubre; su color original cuando vuelve */
-  tint(o, green) {
-    if (o.landmark) { o.mesh.material.color.set(green ? 0x4caf50 : 0xffffff); return; }
-    const def = KINDS[o.kind], mesh = this.meshes[o.kind];
-    _col.setHex(green ? 0x3f9b35 : def.colors[o.inst % def.colors.length]);
-    mesh.setColorAt(o.inst, _col);
-    mesh.instanceColor.needsUpdate = true;
-  }
+  tint(o, green) { this.paintColor(o, green ? 1 : 0); }
 
   /** Saca lo que haya en un área (para construir una casa nueva encima) */
   clearArea(center, rad, now) {
     const list = [];
-    this.query(center, rad, (o) => { if (o.alive && !o.landmark && surfDist(center, o.pos) < rad + o.s) list.push(o); });
+    this.query(center, rad, (o) => { if (o.alive && !o.landmark && !o.over && surfDist(center, o.pos) < rad + o.s) list.push(o); });
     for (const o of list) {
       o.alive = false; this.removeFromGrid(o); this.writeMatrix(o);
       if (o.respawn) this.respawnQueue.push({ o, at: now + 15 + Math.random() * 20 }); else this.release(o);
@@ -492,6 +599,7 @@ export class World {
     const t1 = tangentize(new THREE.Vector3(0, 1, 0), center);
     const t2 = new THREE.Vector3().crossVectors(center, t1);
     const n = 12;
+    const objs = [];
     const wq = new THREE.Quaternion(), x0 = new THREE.Vector3(), tg = new THREE.Vector3(), cr = new THREE.Vector3();
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2;
@@ -500,25 +608,15 @@ export class World {
       x0.set(1, 0, 0).applyQuaternion(wq.setFromUnitVectors(_Y, p));
       cr.crossVectors(x0, tg);
       const yaw = Math.atan2(cr.dot(p), x0.dot(tg));
-      this.spawn('wall', p, { yaw, scale: 1, respawn: false, pts: 3 });
+      const w = this.spawn('wall', p, { yaw, scale: 1, respawn: false, pts: 3 }); if (w) objs.push(w);
     }
     const mix = ['cup', 'cup', 'cup', 'cup', 'book', 'book', 'book', 'book', 'book', 'chair', 'chair', 'chair', 'chair', 'chair', 'chair',
       'lamp', 'lamp', 'lamp', 'table', 'table', 'table', 'sofa', 'sofa', 'bed', 'dog', 'cup', 'book', 'chair', 'person', 'person', 'cup', 'book', 'lamp', 'chair'];
     for (const k of mix) {
       const p = offsetPoint(center, 0.18 + Math.sqrt(Math.random()) * (rad - 0.3), Math.random() * 7);
-      this.spawn(k, p, { respawn: false, scale: 0.85 + Math.random() * 0.3, pts: 1 });
+      const f = this.spawn(k, p, { respawn: false, scale: 0.85 + Math.random() * 0.3, pts: 1 }); if (f) objs.push(f);
     }
-    return { pos: center.clone(), rad };
-  }
-
-  /** Escombros que suelta un hueco partido por una bomba */
-  scatterDebris(center, rInner, totalArea, count) {
-    const per = totalArea / count;
-    for (let i = 0; i < count; i++) {
-      const p = offsetPoint(center, rInner * (1.15 + Math.random() * 1.3), Math.random() * Math.PI * 2);
-      const o = this.spawn('debris', p, { respawn: false, area: per, pts: Math.ceil(per * 12), scale: 0.9 + Math.random() * 0.6 });
-      if (!o) break;
-    }
+    return { pos: center.clone(), rad, objs };
   }
 
   goldRain(city, n) {

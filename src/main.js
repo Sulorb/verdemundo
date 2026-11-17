@@ -2,16 +2,18 @@ import * as THREE from 'three';
 import './style.css';
 import { R, R0, setR, CITIES, LANDMARKS, buildLand, surfDist, dirTo, moveOnSphere, tangentize, offsetPoint, isLand } from './geo.js';
 import { createGlobe, MAX_HOLES } from './globe.js';
-import { World, MOBILE, KINDS } from './objects.js';
+import { World, MOBILE, KINDS, geoTruck, geoSapling } from './objects.js';
+import { initTerritory, paint, transfer, area, grid, idxOf, setColor, ignite, fireStep, douse, upload, sampleOwned, LAND_TOTAL, ASH, FIRE, fireCount, isLandCell } from './territory.js';
+import { makeTree, placeTree, dropTree } from './trees.js';
 import {
   Hole, makeBots, safeSpawn, thinkBot, steer, allied, START_A, GAIN, EAT_RATIO, HOLE_RATIO, MAX_BOMBS, CAMO, WALL_R, TEAM_MAX, PACK,
-  titleOf, titleIndex, fmtSize, TITLES,
+  titleOf, titleIndex, fmtSize, TITLES, TERR_K,
 } from './holes.js';
 import { initAudio, sfx } from './audio.js';
 
 const BOT_POOL = 26; // bots que pueden "conectarse"
 const $ = (id) => document.getElementById(id);
-const TINY = new Set(Object.keys(KINDS).filter((k) => KINDS[k].s < 0.3 && k !== 'debris'));
+const TINY = new Set(Object.keys(KINDS).filter((k) => KINDS[k].s < 0.3 && k !== 'seed'));
 
 // ---------- Escena ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -27,6 +29,7 @@ scene.add(sun, sun.target);
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
 buildLand();
+initTerritory();
 const globe = createGlobe(scene);
 const world = new World(scene);
 world.populate();
@@ -36,10 +39,15 @@ $('loading').classList.add('hidden');
 const player = new Hole({ name: 'Vos', color: 0xb4ff3a, isPlayer: true });
 const offline = makeBots(BOT_POOL);
 const holes = [player]; // conectados (el jugador siempre está, vivo o no)
+const byId = [];
+for (const h of [player, ...offline]) { byId[h.id] = h; setColor(h.id, h.color); }
+const landPct = (h) => (area[h.id] / LAND_TOTAL) * 100;
+const fmtPct = (x) => (x < 10 ? x.toFixed(1) : Math.round(x)).toString().replace('.', ',') + ' %';
+const bioOf = (o) => o.area ?? o.s * o.s * GAIN * (o.g || 1);
 
 const game = {
   holes, world, now: 0, event: null, leader: null, state: 'menu', frenzyUntil: 0, nextEvent: 40,
-  throwBomb, startCamo, popTarget: 16, popT: 0, popChange: 0,
+  throwBomb, startCamo, popTarget: 16, popT: 0, popChange: 0, trucks: [], cleanups: [],
 };
 const frenzy = () => game.now < game.frenzyUntil;
 
@@ -103,6 +111,7 @@ function disconnectBot() {
   leaveTeam(b, true);
   holes.splice(holes.indexOf(b), 1);
   b.alive = false;
+  witherHole(b);
   offline.push(b);
   const el = labelEls.get(b); if (el) { el.remove(); labelEls.delete(b); }
   feed(`⚪ <b style="color:${css(b)}">${b.name}</b> se desconectó`);
@@ -116,6 +125,194 @@ function population(dt) {
   if (n < game.popTarget) connectBot(); else if (n > game.popTarget) disconnectBot();
 }
 let socialT = 0;
+
+// ---------- Territorio ----------
+/** La selva muere o se va: su tierra pasa al que la mató (cerca) o queda libre */
+function witherHole(h, killer) {
+  if (h.home) { game.cleanups.push({ objs: h.home.objs, at: game.now + 20 }); h.home = null; }
+  h.ep++;
+  transfer(h.id, killer ? killer.id : 0, killer ? killer.pos : null, killer ? killer.r * 3 + 8 : 0, R);
+  h.bio = 0;
+}
+let paintT = 0, fireMis = 0;
+function paintAll(dt) {
+  paintT -= dt;
+  if (paintT > 0) return;
+  paintT = 0.1;
+  for (const h of holes) {
+    if (!h.alive || h.camo === 'hidden') continue;
+    const prot = h.team ? h.team.members.filter((m) => m !== h).map((m) => m.id) : null;
+    const r = paint(h.pos, h.r * 0.92, h.id, R, -1, prot);
+    if (h === player && r.fire) { fireMis += r.fire; if (fireMis > 25) { mission('fire'); fireMis = 0; } }
+  }
+}
+/** Lo enredado cambia de dueño si cambia el dueño de la tierra (por partes, cada cuadro) */
+let sweepI = 0;
+function sweep() {
+  const objs = world.objs;
+  const n = Math.min(objs.length, MOBILE ? 1500 : 3000);
+  for (let k = 0; k < n; k++) {
+    if (sweepI >= objs.length) sweepI = 0;
+    const o = objs[sweepI++];
+    if (!o.over || !o.alive) continue;
+    const g = grid[o.tidx], own = o.owner;
+    if (own && own.alive && o.ep === own.ep && (g === own.id || !isLandCell(o.tidx))) continue;
+    if (own && o.ep === own.ep) own.addBio(-bioOf(o));
+    const nw = byId[g];
+    if (nw && nw.alive && nw.r * EAT_RATIO > o.s) { world.overgrow(o, nw); nw.addBio(bioOf(o)); }
+    else world.unover(o);
+  }
+}
+
+// ---------- Leñadores: las ciudades se defienden ----------
+const truckMesh = new THREE.InstancedMesh(geoTruck(), new THREE.MeshLambertMaterial({ vertexColors: true }), 40);
+truckMesh.frustumCulled = false; truckMesh.count = 40;
+const truckFree = [];
+const VINE_GREEN = new THREE.Color(0x3f9b35);
+const _tm = new THREE.Matrix4(), _tx = new THREE.Vector3(), _tz = new THREE.Vector3(), _ts = new THREE.Vector3(), _tq = new THREE.Quaternion(), _tc = new THREE.Color();
+for (let i = 39; i >= 0; i--) { truckFree.push(i); truckMesh.setMatrixAt(i, _tm.makeScale(0, 0, 0)); truckMesh.setColorAt(i, _tc.setHex(0xffffff)); }
+scene.add(truckMesh);
+const trucks = game.trucks;
+let truckT = 3;
+function cityRad(c) { return 2.2 + c.w * 1.6; }
+function spawnTruck(c, goal, target) {
+  const inst = truckFree.pop(); if (inst === undefined) return;
+  const pos = offsetPoint(c.pos, Math.random() * cityRad(c) * 0.5, Math.random() * 7);
+  const t = { pos, dir: dirTo(pos, goal, new THREE.Vector3()), goal, target, city: c, inst, prog: 0, cutT: 0, life: 0, re: 14, miss: 0 };
+  trucks.push(t);
+  if (target === player.id && game.state === 'play' && (c.warned || 0) < game.now) {
+    c.warned = game.now + 60;
+    feed(`🚜 <b>${c.name}</b> manda leñadores contra tu selva`);
+    banner(`🚜 ${c.name} manda leñadores: ¡enredalos!`);
+  }
+}
+function removeTruck(t) {
+  t.dead = true;
+  truckMesh.setMatrixAt(t.inst, _tm.makeScale(0, 0, 0)); truckMesh.instanceMatrix.needsUpdate = true;
+  truckFree.push(t.inst);
+  trucks.splice(trucks.indexOf(t), 1);
+}
+function humans(dt) {
+  // a los brotes chiquitos y a los que siguen en la maceta no los molestan
+  const prot = holes.filter((h) => h.alive && (h.r < 1 || h.home)).map((h) => h.id);
+  truckT -= dt;
+  if (truckT <= 0) {
+    truckT = 2.2;
+    const cap = Math.min(40, 8 + holes.length);
+    if (trucks.length < cap) {
+      const c = CITIES[Math.floor(Math.random() * CITIES.length)];
+      if (trucks.filter((t) => t.city === c).length < 2) {
+        const q = sampleOwned(c.pos, cityRad(c) * 1.8, -1, R, 14);
+        if (q && !prot.includes(grid[idxOf(q)])) spawnTruck(c, q, grid[idxOf(q)]);
+      }
+    }
+  }
+  for (let i = trucks.length - 1; i >= 0; i--) {
+    const t = trucks[i];
+    t.life += dt;
+    steer(t.dir, dirTo(t.pos, t.goal, _v2), t.pos, 2.5 * dt);
+    moveOnSphere(t.pos, t.dir, 2.3 * dt);
+    t.cutT -= dt;
+    if (t.cutT <= 0) { t.cutT = 0.25; paint(t.pos, 0.8, 0, R, -1, prot); }
+    if (surfDist(t.pos, t.goal) < 0.6 || t.life > t.re) {
+      const q = sampleOwned(t.pos, 7, -1, R, 16);
+      t.re = t.life + 12;
+      if (q && !prot.includes(grid[idxOf(q)])) { t.goal = q; t.target = grid[idxOf(q)]; t.miss = 0; }
+      else if (++t.miss > 2 && surfDist(t.pos, t.city.pos) < 1.5) { removeTruck(t); continue; }
+      else t.goal = t.city.pos;
+    }
+    // la selva lo enreda si lo tapa con su copa
+    let by = null;
+    for (const h of holes) if (h.alive && h.solid() && h.r >= 0.45 && surfDist(h.pos, t.pos) < h.r) { by = h; break; }
+    if (by) t.prog += dt; else t.prog = Math.max(0, t.prog - dt);
+    if (t.prog > 0.7) {
+      by.addBio(0.12 + by.r * 0.01); by.score += 150; by.trucks++;
+      ring(t.pos, 2.5, 0x7dff5a, 0.5);
+      if (by === player) { popup(t.pos, '🚜 +150', '#ffd23a', 24); sfx.gold(); mission('truck'); }
+      removeTruck(t); continue;
+    }
+    _ts.copy(t.pos);
+    _tx.crossVectors(_ts, t.dir).normalize(); // derecha
+    _tz.copy(t.dir);
+    _tm.makeBasis(_tx, _ts, _tz).scale(_v1.setScalar(0.42)).setPosition(_v3.copy(t.pos).multiplyScalar(R));
+    truckMesh.setMatrixAt(t.inst, _tm);
+    truckMesh.setColorAt(t.inst, _tc.setHex(0xffffff).lerp(VINE_GREEN, Math.min(1, t.prog / 0.7)));
+  }
+  truckMesh.instanceMatrix.needsUpdate = true;
+  if (truckMesh.instanceColor) truckMesh.instanceColor.needsUpdate = true;
+}
+
+// ---------- Brotes (semillas plantadas) ----------
+const SAP_CAP = 160;
+const sapMesh = new THREE.InstancedMesh(geoSapling(), new THREE.MeshLambertMaterial({ vertexColors: true }), SAP_CAP);
+sapMesh.frustumCulled = false; sapMesh.count = SAP_CAP;
+const sapFree = [];
+for (let i = SAP_CAP - 1; i >= 0; i--) { sapFree.push(i); sapMesh.setMatrixAt(i, _tm.makeScale(0, 0, 0)); sapMesh.setColorAt(i, _tc.setHex(0xffffff)); }
+scene.add(sapMesh);
+const outposts = [];
+let sapT = 0;
+function plantOutpost(h, pos) {
+  const mine = outposts.filter((b) => b.h === h);
+  if (mine.length >= 5) removeOutpost(mine[0]);
+  const inst = sapFree.pop(); if (inst === undefined) return;
+  const b = { h, ep: h.ep, pos: pos.clone(), rad: 0.9, max: 2 + h.r * 0.7, inst, yaw: Math.random() * 7 };
+  outposts.push(b);
+  paint(b.pos, b.rad, h.id, R);
+  h.outposts++;
+  sapMesh.setColorAt(inst, _tc.copy(h.color)); sapMesh.instanceColor.needsUpdate = true;
+  ring(pos, 2, h.color.getHex(), 0.5);
+  if (h === player) { sfx.landmark(); popup(pos, '🌱', '#7dff5a', 26); mission('outpost'); }
+}
+function removeOutpost(b) {
+  sapMesh.setMatrixAt(b.inst, _tm.makeScale(0, 0, 0)); sapMesh.instanceMatrix.needsUpdate = true;
+  sapFree.push(b.inst);
+  outposts.splice(outposts.indexOf(b), 1);
+}
+function updateOutposts(dt) {
+  sapT -= dt;
+  if (sapT > 0) return;
+  sapT = 0.4;
+  for (let i = outposts.length - 1; i >= 0; i--) {
+    const b = outposts[i];
+    if (!b.h.alive || b.ep !== b.h.ep || grid[idxOf(b.pos)] !== b.h.id) {
+      if (b.h === player && game.state === 'play') feed('🪓 Te cortaron un brote');
+      removeOutpost(b); continue;
+    }
+    b.rad = Math.min(b.max, b.rad + 0.1);
+    paint(b.pos, b.rad, b.h.id, R);
+    _tq.setFromUnitVectors(_Y, b.pos);
+    _tm.compose(_v3.copy(b.pos).multiplyScalar(R), _tq, _v1.setScalar(0.35 + b.rad * 0.22));
+    sapMesh.setMatrixAt(b.inst, _tm);
+  }
+  sapMesh.instanceMatrix.needsUpdate = true;
+}
+const _Y = new THREE.Vector3(0, 1, 0);
+
+// ---------- Árboles madre ----------
+const treeOf = new Map();
+function trees(dt) {
+  for (const h of byId) {
+    if (!h) continue;
+    let t = treeOf.get(h);
+    const show = h.alive && holes.includes(h);
+    if (!t) { if (!show) continue; t = makeTree(scene, h.color); treeOf.set(h, t); }
+    if (!show) { t.g.visible = false; continue; }
+    placeTree(t, h, dt, !!(h.home && h.r < WALL_R));
+  }
+}
+
+// ---------- Casas abandonadas ----------
+function cleanups() {
+  for (let i = game.cleanups.length - 1; i >= 0; i--) {
+    const c = game.cleanups[i];
+    if (game.now < c.at) continue;
+    world.removeObjs(c.objs);
+    game.cleanups.splice(i, 1);
+  }
+  for (const o of world.partial) {
+    if (game.now - (o.progT || 0) > 1.2) { world.paintColor(o, o.over ? 1 : 0); o.prog = 0; world.partial.delete(o); }
+  }
+}
 
 // ---------- El planeta crece con los jugadores ----------
 let builtR = R, topT = 0;
@@ -279,7 +476,7 @@ function packEat(t, T) {
   const pts = (300 + Math.round(T.A * 40)) * (frenzy() ? 2 : 1);
   for (const m of touching) {
     const k = m.A / sum;
-    m.setArea(m.A + T.A * 0.7 * k);
+    m.addBio(T.A * 0.45 * k);
     m.score += Math.round(pts * k); m.kills++; m.packs++;
     if (m === player) { popup(m.pos, `🌿 +${Math.round(pts * k)}`, '#4da3ff', 30); mission('pack'); mission('kill'); }
   }
@@ -311,17 +508,20 @@ function updateCamo(h, dt) {
 
 // ---------- Misiones ----------
 const MISSION_POOL = [
-  { id: 'tiny', txt: 'Cubrí {n} cositas', type: 'eat', f: (k) => TINY.has(k), n: [40, 80] },
-  { id: 'tree', txt: 'Cubrí {n} árboles', type: 'eat', f: (k) => k === 'tree' || k === 'palm', n: [20, 40] },
-  { id: 'car', txt: 'Cubrí {n} carros', type: 'eat', f: (k) => k === 'car', n: [15, 30] },
-  { id: 'person', txt: 'Cubrí {n} personas', type: 'eat', f: (k) => k === 'person', n: [20, 40] },
-  { id: 'house', txt: 'Cubrí {n} casas', type: 'eat', f: (k) => k === 'house', n: [10, 25], minR: 0.6 },
-  { id: 'building', txt: 'Cubrí {n} edificios', type: 'eat', f: (k) => k === 'building', n: [8, 16], minR: 1 },
-  { id: 'tower', txt: 'Cubrí {n} rascacielos', type: 'eat', f: (k) => k === 'tower', n: [3, 6], minR: 1.8 },
+  { id: 'tiny', txt: 'Enredá {n} cositas', type: 'eat', f: (k) => TINY.has(k), n: [40, 80] },
+  { id: 'car', txt: 'Enredá {n} carros', type: 'eat', f: (k) => k === 'car', n: [15, 30] },
+  { id: 'person', txt: 'Enredá {n} personas', type: 'eat', f: (k) => k === 'person', n: [20, 40] },
+  { id: 'house', txt: 'Enredá {n} casas', type: 'eat', f: (k) => k === 'house', n: [10, 25], minR: 0.6 },
+  { id: 'building', txt: 'Enredá {n} edificios', type: 'eat', f: (k) => k === 'building', n: [8, 16], minR: 1 },
+  { id: 'tower', txt: 'Enredá {n} rascacielos', type: 'eat', f: (k) => k === 'tower', n: [3, 6], minR: 1.8 },
   { id: 'gold', txt: 'Juntá {n} gotas 💧', type: 'eat', f: (k) => k === 'gold', n: [5, 10] },
   { id: 'kill', txt: 'Absorbé {n} selva(s)', type: 'kill', n: [1, 2] },
-  { id: 'split', txt: 'Quemá a alguien con 🔥', type: 'split', n: [1, 1], minR: 0.4 },
-  { id: 'landmark', txt: 'Cubrí un monumento 🏛️', type: 'landmark', n: [1, 1], minR: 3 },
+  { id: 'split', txt: 'Pegale una semilla a una selva 🌰', type: 'split', n: [1, 1], minR: 0.4 },
+  { id: 'outpost', txt: 'Plantá {n} brotes 🌱', type: 'outpost', n: [2, 4], minR: 0.4 },
+  { id: 'truck', txt: 'Enredá {n} leñadores 🚜', type: 'truck', n: [1, 3], minR: 0.5 },
+  { id: 'fire', txt: 'Apagá un incendio 🔥', type: 'fire', n: [1, 1], minR: 0.6 },
+  { id: 'terr', txt: 'Cubrí el {p} del planeta', type: 'terr' },
+  { id: 'landmark', txt: 'Enredá un monumento 🏛️', type: 'landmark', n: [1, 1], minR: 3 },
   { id: 'team', txt: 'Armá una alianza 🤝', type: 'team', n: [1, 1] },
   { id: 'pack', txt: 'Enredá en alianza 🌿', type: 'pack', n: [1, 1], minR: 0.4 },
   { id: 'combo', txt: 'Hacé un combo de {n}', type: 'combo', n: [25, 50] },
@@ -332,6 +532,10 @@ function newMission() {
   const used = new Set(missions.map((m) => m.id));
   const cands = MISSION_POOL.filter((m) => !used.has(m.id) && (!m.minR || player.r >= m.minR * 0.7));
   const t = cands[Math.floor(Math.random() * cands.length)];
+  if (t.type === 'terr') {
+    const goal = Math.max(0.3, Math.ceil(landPct(player) * 1.6 * 10 + 1) / 10);
+    return { ...t, goal, txt: t.txt.replace('{p}', fmtPct(goal)), prog: 0 };
+  }
   if (t.type === 'size') {
     const ti = Math.min(TITLES.length - 1, titleIndex(player.r) + 1);
     return { ...t, goal: TITLES[ti][0], txt: t.txt.replace('{t}', TITLES[ti][1]), prog: 0 };
@@ -346,11 +550,11 @@ function mission(type, kind, n = 1) {
     const m = missions[i];
     if (m.type !== type) continue;
     if (type === 'eat' && !m.f(kind)) continue;
-    if (type === 'combo' || type === 'size') m.prog = Math.max(m.prog, n); else m.prog += n;
+    if (type === 'combo' || type === 'size' || type === 'terr') m.prog = Math.max(m.prog, n); else m.prog += n;
     if (m.prog >= m.goal) {
       const reward = 250 + Math.round(player.A * 60);
       player.score += reward;
-      player.setArea(player.A * 1.1);
+      player.addBio(player.A * 0.1);
       banner(`✅ ${m.txt}  +${reward} y +10 % tamaño`); sfx.level();
       store.set('missions', store.get('missions', 0) + 1);
       missions[i] = newMission();
@@ -361,7 +565,7 @@ function mission(type, kind, n = 1) {
 // ---------- Bombas ----------
 const projectiles = [];
 const bombGeo = new THREE.SphereGeometry(0.5, 12, 10);
-const bombMat = new THREE.MeshBasicMaterial({ color: 0xff7a1a });
+const bombMat = new THREE.MeshLambertMaterial({ color: 0xb5651d, emissive: 0x3a1a00 });
 const rings = [];
 const ringGeo = new THREE.RingGeometry(0.85, 1, 48);
 
@@ -386,24 +590,23 @@ function ring(pos, size, color, dur = 0.7) {
 }
 
 function explode(p, target) {
-  ring(p.pos, 3 + (target ? target.r * 2 : 0), 0xff7a2f);
-  if (nearPlayer(p.pos, 40)) { sfx.boom(); shake = Math.max(shake, 0.6); }
-  if (!target) return;
   const o = p.owner;
-  target.stun = 0.4 + Math.min(0.9, o.r / target.r);
-  if (target.r > 1.3) {
-    // el daño depende del tamaño del que la tira: un chiquito apenas le hace cosquillas a un gigante
-    const frac = Math.max(0.03, Math.min(0.42, 0.42 * (o.r / target.r) * 1.5));
-    const lost = target.A * frac;
-    target.setArea(target.A - lost);
-    world.scatterDebris(target.pos, target.r, lost * 0.6, Math.max(6, Math.min(70, Math.round(lost * 2.5))));
-    target.splits++; o.splits++;
-    const pts = 100 + Math.round(lost * 25);
-    o.score += pts;
-    feed(`🔥 <b style="color:${css(o)}">${o.name}</b> quemó a <b style="color:${css(target)}">${target.name}</b>`);
-    if (o === player) { popup(player.pos, `🔥 +${pts}`, '#ff9d2f'); banner(`🔥 ¡Le quemaste ${Math.round(frac * 100)} % a ${target.name}!`); mission('split'); }
-    if (target === player) banner(`🔥 ${o.name} te quemó ${Math.round(frac * 100)} %`);
-  }
+  ring(p.pos, 2 + (target ? target.r * 2 : 0), o.color.getHex());
+  if (nearPlayer(p.pos, 40)) { sfx.boom(); shake = Math.max(shake, 0.3); }
+  if (!target) { if (isLand(p.pos) && o.alive) plantOutpost(o, p.pos); return; }
+  // la semilla brota encima de la otra selva: la enreda y le roba raíces alrededor de su copa.
+  // todo depende del tamaño del que la tira: un brote apenas le hace cosquillas a una jungla
+  target.stun = 0.4 + Math.min(1, o.r / target.r);
+  const frac = Math.max(0.02, Math.min(0.25, 0.25 * (o.r / target.r) * 1.5));
+  const lost = target.bio * frac;
+  target.addBio(-lost); o.addBio(lost * 0.5);
+  paint(target.pos, target.r + 1 + o.r * 0.8, o.id, R, target.id);
+  target.splits++; o.splits++;
+  const pts = 100 + Math.round(lost * 25);
+  o.score += pts;
+  feed(`🌰 <b style="color:${css(o)}">${o.name}</b> enredó a <b style="color:${css(target)}">${target.name}</b>`);
+  if (o === player) { popup(player.pos, `🌰 +${pts}`, '#c8ff5a'); banner(`🌰 ¡Le robaste ${Math.round(frac * 100)} % a ${target.name}!`); mission('split'); }
+  if (target === player) banner(`🌰 ${o.name} te robó ${Math.round(frac * 100)} %`);
 }
 
 // ---------- Input ----------
@@ -546,11 +749,11 @@ function updateBoard() {
   $('board').innerHTML = rows.map((h) => {
     const pos = list.indexOf(h) + 1;
     const mate = h !== player && player.team && h.team === player.team;
-    return `<div class="row ${h === player ? 'me' : mate ? 'mate' : ''}"><span>${pos}.</span><span class="dot" style="background:${css(h)}"></span><span class="nm">${h === game.leader ? '👑 ' : ''}${tag(h)}${h.name}</span><span class="pt">${fmtSize(h.r)}</span></div>`;
+    return `<div class="row ${h === player ? 'me' : mate ? 'mate' : ''}"><span>${pos}.</span><span class="dot" style="background:${css(h)}"></span><span class="nm">${h === game.leader ? '👑 ' : ''}${tag(h)}${h.name}</span><span class="pt">${fmtPct(landPct(h))}</span></div>`;
   }).join('');
   $('missions').innerHTML = missions.map((m) => {
     const p = m.type === 'size' ? Math.min(1, player.r / m.goal) : Math.min(1, m.prog / m.goal);
-    const txt = m.type === 'size' ? '' : ` ${Math.min(m.prog, m.goal)}/${m.goal}`;
+    const txt = m.type === 'size' || m.type === 'terr' ? '' : ` ${Math.min(m.prog, m.goal)}/${m.goal}`;
     return `<div class="mis"><span>${m.txt}${txt}</span><i style="width:${p * 100}%"></i></div>`;
   }).join('');
 }
@@ -558,26 +761,26 @@ function updateBoard() {
 function fmtTime(t) { return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`; }
 
 function updateMeHud() {
-  $('score').textContent = player.score.toLocaleString('es');
+  $('score').textContent = Math.round(player.score).toLocaleString('es');
   const mult = comboMult(player);
   const c = $('combo');
   c.textContent = player.combo >= 3 ? `COMBO ${player.combo}${mult > 1 ? `  ×${mult}` : ''}` : '';
   c.classList.toggle('hot', mult >= 3);
-  $('mons').textContent = `🏛️ ${coleccion.size}/${LANDMARKS.length}`;
+  $('mons').textContent = `🌍 ${fmtPct(landPct(player))} del planeta · 🏛️ ${coleccion.size}/${LANDMARKS.length}`;
   const ti = titleIndex(player.r);
   $('title').textContent = `${TITLES[ti][1]} · ${fmtSize(player.r)}`;
   const lo = TITLES[ti][0], hi = TITLES[ti + 1] ? TITLES[ti + 1][0] : lo * 1.5 + 5;
   $('barFill').style.width = Math.min(100, ((player.r - lo) / (hi - lo)) * 100) + '%';
   const ready = player.camo === 'none' && player.camoCharge >= CAMO.charge;
   const camoTxt = player.camo !== 'none' ? '🌱 activo' : ready ? `🌱 LISTO${MOBILE ? '' : ' (E)'}` : `🌱 ${Math.ceil(CAMO.charge - player.camoCharge)} s`;
-  $('bombs').textContent = '🔥'.repeat(player.bombs) + '◦'.repeat(MAX_BOMBS - player.bombs) + '   ' + camoTxt;
+  $('bombs').textContent = '🌰'.repeat(player.bombs) + '◦'.repeat(MAX_BOMBS - player.bombs) + '   ' + camoTxt;
   const bc = $('btnCamo');
   bc.classList.toggle('ready', ready);
   bc.style.setProperty('--p', player.camo !== 'none' ? 100 : (player.camoCharge / CAMO.charge) * 100);
   $('btnBomb').dataset.n = player.bombs;
   const cs = $('camoState');
   let st = '';
-  if (player.home && player.r < WALL_R) st = `🪴 Cubrí los muebles para crecer (${fmtSize(player.r)} / ${fmtSize(WALL_R)})`;
+  if (player.home && player.r < WALL_R) st = `🪴 Enredá los muebles para crecer (${fmtSize(player.r)} / ${fmtSize(WALL_R)})`;
   else if (player.home) st = '🌿 ¡Tus raíces ya rompen las paredes! Salí a la calle';
   else if (player.siege > 0) st = `🌿 ¡Te están enredando! ${Math.round((player.siege / PACK.time) * 100)}%`;
   else if (player.camo !== 'none') st = player.camo === 'fade' ? `🌱 Echando raíces… ${Math.ceil(CAMO.fade - player.camoT)}`
@@ -608,59 +811,73 @@ function updateMeHud() {
 
 function comboMult(h) { return Math.min(5, 1 + Math.floor(h.combo / 8)) * (frenzy() ? 2 : 1); }
 
-// ---------- Comer ----------
-const toEat = [];
+// ---------- Enredar ----------
+const toEat = [], toGrow = [];
 let lastTitle = 0;
-function eatObjects(h) {
-  toEat.length = 0;
+function eatObjects(h, dt) {
+  toEat.length = 0; toGrow.length = 0;
   world.query(h.pos, h.r + 1, (o) => {
     if (!o.alive) return;
     const d = surfDist(h.pos, o.pos);
-    if (o.kind === 'bomb') { if (d < h.r + 0.15 && h.bombs < MAX_BOMBS) toEat.push(o); }
-    else if (o.s < h.r * EAT_RATIO && d + o.s * 0.4 < h.r) toEat.push(o);
+    if (o.kind === 'seed') { if (d < h.r + 0.15 && h.bombs < MAX_BOMBS) toEat.push(o); return; }
+    if (o.kind === 'gold') { if (d < h.r + 0.15) toEat.push(o); return; }
+    if (o.over && o.owner === h) return;
+    if (o.s < h.r * EAT_RATIO && d + o.s * 0.4 < h.r) toGrow.push(o);
   });
   for (const o of toEat) {
     if (!o.alive) continue;
     world.kill(o, h);
-    if (o.kind === 'bomb') {
-      h.bombs++;
-      if (h === player) { sfx.bombPick(); popup(h.pos, '🔥', '#ff8a3d', 26); }
-      continue;
-    }
-    h.setArea(h.A + (o.area ?? o.s * o.s * GAIN * (o.g || 1)));
-    h.combo = h.comboT > 0 ? h.combo + 1 : 1;
-    h.comboT = 1.6;
-    const pts = o.pts * comboMult(h);
-    h.score += pts; h.eaten++;
-    if (o.kind === 'gold') h.rush = 3;
-    if (o.landmark) {
-      h.landmarks.push(o.landmark.name);
-      feed(`🏛️ <b style="color:${css(h)}">${h.name}</b> cubrió ${o.landmark.name}`);
-    }
-    if (h === player) {
-      pending += pts;
-      sfx.eat(h.combo, o.s * 3);
-      mission('eat', o.kind); mission('combo', null, h.combo);
-      if (o.kind === 'gold') { sfx.gold(); popup(h.pos, `💧 +${pts}`, '#6ec6ff', 26); }
-      if (o.kind === 'wall' && h.home) { shake = 0.15; }
-      if (o.landmark) {
-        sfx.landmark(); shake = 0.5; mission('landmark');
-        const nuevo = !coleccion.has(o.landmark.name);
-        coleccion.add(o.landmark.name); store.set('coleccion', [...coleccion]);
-        banner(`¡Cubriste ${o.landmark.name}! +${pts}${nuevo ? '  ⭐ NUEVO' : ''}`);
-      }
-    }
+    if (o.kind === 'seed') { h.bombs++; if (h === player) { sfx.bombPick(); popup(h.pos, '🌰', '#d9a066', 26); } continue; }
+    h.addBio(o.s * o.s * GAIN * 4); h.rush = 3;
+    const pts = o.pts * comboMult(h); h.score += pts;
+    if (h === player) { sfx.gold(); popup(h.pos, `💧 +${pts}`, '#6ec6ff', 26); mission('eat', o.kind); }
+  }
+  const sp = frenzy() ? 2 : 1;
+  for (const o of toGrow) {
+    if (o.progOwner !== h || game.now - (o.progT || 0) > 1.2) { o.prog = 0; o.progOwner = h; }
+    o.progT = game.now;
+    o.prog += (dt * sp) / (0.1 + o.s * 0.45);
+    if (o.prog < 1) { world.progress(o, o.prog); continue; }
+    claim(o, h);
   }
   if (h === player) {
     const ti = titleIndex(h.r);
     if (ti > lastTitle) { banner(`¡Ahora sos ${TITLES[ti][1].toUpperCase()}!`); sfx.level(); }
     lastTitle = Math.max(lastTitle, ti);
     mission('size', null, h.r);
+    mission('terr', null, landPct(h));
+  }
+}
+function claim(o, h) {
+  if (o.over && o.owner && o.ep === o.owner.ep) o.owner.addBio(-bioOf(o));
+  if (isLandCell(o.tidx)) paint(o.pos, 0.3 + o.s * 0.5, h.id, R);
+  world.overgrow(o, h);
+  h.addBio(bioOf(o));
+  h.combo = h.comboT > 0 ? h.combo + 1 : 1;
+  h.comboT = 1.6;
+  const pts = o.pts * comboMult(h);
+  h.score += pts; h.eaten++;
+  if (o.landmark) {
+    h.landmarks.push(o.landmark.name);
+    feed(`🏛️ <b style="color:${css(h)}">${h.name}</b> enredó ${o.landmark.name}`);
+  }
+  if (h === player) {
+    pending += pts;
+    sfx.eat(h.combo, o.s * 3);
+    mission('eat', o.kind); mission('combo', null, h.combo);
+    if (o.kind === 'wall' && h.home) shake = 0.15;
+    if (o.landmark) {
+      sfx.landmark(); shake = 0.5; mission('landmark');
+      const nuevo = !coleccion.has(o.landmark.name);
+      coleccion.add(o.landmark.name); store.set('coleccion', [...coleccion]);
+      banner(`¡${o.landmark.name} es tuyo! +${pts}${nuevo ? '  ⭐ NUEVO' : ''}`);
+    }
   }
 }
 
 function killHole(small, killer, msg) {
   small.alive = false; small.deaths++; small.killer = killer;
+  witherHole(small, killer);
   small.respawnAt = game.now + 3 + Math.random() * 3;
   small.siege = 0;
   ring(small.pos, small.r * 3 + 1, small.color.getHex(), 0.6);
@@ -670,7 +887,7 @@ function killHole(small, killer, msg) {
 function eatHole(big, small) {
   const bonus = small === game.leader ? 500 : 0;
   const pts = (150 + Math.round(small.A * 30) + bonus) * (frenzy() ? 2 : 1);
-  big.setArea(big.A + small.A * 0.6);
+  big.addBio(small.A * 0.35);
   big.score += pts; big.kills++;
   if (big === player) { sfx.hole(); popup(big.pos, `🌳 +${pts}`, '#5dff8f', 28); mission('kill'); if (bonus) banner(`👑 ¡Absorbiste a la líder ${small.name}!`); }
   killHole(small, big, `🌳 <b style="color:${css(big)}">${tag(big)}${big.name}</b> absorbió a <b style="color:${css(small)}">${small.name}</b>${bonus ? ' 👑' : ''}`);
@@ -683,7 +900,7 @@ function startGame() {
   game.state = 'play';
   $('hud').classList.remove('hidden');
   ['start', 'dead'].forEach((id) => $(id).classList.add('hidden'));
-  banner('🪴 Brotaste en una maceta. ¡Cubrí todo de selva!');
+  banner('🪴 Brotaste en una maceta. ¡Enredá todo!');
 }
 
 function spawnPlayer(cityIdx, nearMate) {
@@ -707,11 +924,11 @@ function die(killer) {
   const life = game.now - player.bornAt;
   const best = store.get('best', 0);
   const record = player.score > best;
-  if (record) store.set('best', player.score);
+  if (record) store.set('best', Math.round(player.score));
   if (player.bestR > store.get('bestR', 0)) store.set('bestR', player.bestR);
   $('killer').textContent = killer ? killer.name : '?';
   $('killer').style.color = killer ? css(killer) : '#fff';
-  $('deadStats').innerHTML = `${record ? '⭐ <b>¡Récord!</b><br>' : ''}Duraste <b>${fmtTime(life)}</b> · Llegaste a <b>${titleOf(player.bestR)}</b> (${fmtSize(player.bestR)})<br>${player.score.toLocaleString('es')} pts · ${player.eaten} cosas · ${player.kills} selvas · ${player.landmarks.length} monumentos`;
+  $('deadStats').innerHTML = `${record ? '⭐ <b>¡Récord!</b><br>' : ''}Duraste <b>${fmtTime(life)}</b> · Llegaste a <b>${titleOf(player.bestR)}</b> (${fmtSize(player.bestR)}) · <b>${fmtPct(player.bestT || 0)}</b> del planeta<br>${Math.round(player.score).toLocaleString('es')} pts · ${player.eaten} cosas enredadas · ${player.kills} selvas · ${player.trucks} leñadores · ${player.landmarks.length} monumentos`;
   const mate = player.team && player.team.members.find((m) => m !== player && m.alive);
   $('reviveMate').classList.toggle('hidden', !mate);
   if (mate) $('reviveMate').textContent = `Nacer junto a ${mate.name} ${player.team.icon}`;
@@ -722,7 +939,7 @@ function revive(withMate) {
   if (game.state !== 'dead') return;
   $('dead').classList.add('hidden');
   // cada vida nueva arranca de cero en puntos
-  player.score = 0; player.eaten = 0; player.kills = 0; player.landmarks = []; player.bestR = 0;
+  player.score = 0; player.eaten = 0; player.kills = 0; player.landmarks = []; player.bestR = 0; player.bestT = 0; player.trucks = 0;
   const mate = withMate && player.team && player.team.members.find((m) => m !== player && m.alive);
   spawnPlayer(+$('city').value, mate || null);
   game.state = 'play';
@@ -747,19 +964,35 @@ function worldEvents() {
   if (game.now < game.nextEvent) return;
   game.nextEvent = game.now + 55 + Math.random() * 40;
   const k = Math.random();
-  if (k < 0.45) {
+  // la selva con más territorio atrae los incendios
+  let big = null;
+  for (const h of holes) if (h.alive && (!big || area[h.id] > area[big.id])) big = h;
+  if (k < 0.3) {
     const city = pickCity();
     world.goldRain(city, 34);
-    game.event = { city, kind: 'gold', until: game.now + 40 };
+    douse(city.pos, 12 + city.w * 6, R);
+    game.event = { pos: city.pos, name: city.name, kind: 'gold', until: game.now + 40 };
     feed(`⛈️💧 ¡Tormenta en <b>${city.name}</b>!`); banner(`⛈️💧 Tormenta en ${city.name}: ¡a beber!`);
-  } else if (k < 0.75) {
+  } else if (k < 0.55) {
     game.frenzyUntil = game.now + 25;
-    feed('🌸 ¡PRIMAVERA! Todo vale doble 25 s'); banner('🌸 ¡PRIMAVERA ×2!');
+    feed('🌸 ¡PRIMAVERA! Se enreda el doble de rápido 25 s'); banner('🌸 ¡PRIMAVERA ×2!');
+  } else if (k < 0.82 && big && area[big.id] > 150) {
+    let lit = 0, at = null;
+    for (let t = 0; t < 30 && lit < 5; t++) {
+      const q = sampleOwned(big.pos, 14 + big.r * 5, big.id, R, 8);
+      if (!q || surfDist(q, big.pos) < big.r * 1.3) continue;
+      if (ignite(idxOf(q))) { lit++; at = at || q; }
+    }
+    if (at) {
+      game.event = { pos: at, name: big.name, kind: 'fire', until: game.now + 35 };
+      feed(`🔥 ¡Incendio forestal en la selva de <b style="color:${css(big)}">${big.name}</b>!`);
+      banner(big === player ? '🔥 ¡Se quema tu selva! Pasá por encima del fuego' : `🔥 Se quema la selva de ${big.name}: ¡a robarle tierra!`);
+    }
   } else {
     const city = pickCity();
-    for (let i = 0; i < 22; i++) world.spawn('bomb', offsetPoint(city.pos, Math.random() * (2 + city.w * 2), Math.random() * 7), { respawn: false, scale: 1, pts: 0 });
-    game.event = { city, kind: 'bomb', until: game.now + 40 };
-    feed(`🔥 ¡Ola de calor en <b>${city.name}</b>: chispas por todo lado!`); banner(`🔥 Ola de calor en ${city.name}`);
+    for (let i = 0; i < 22; i++) world.spawn('seed', offsetPoint(city.pos, Math.random() * (2 + city.w * 2), Math.random() * 7), { respawn: false, scale: 1, pts: 0 });
+    game.event = { pos: city.pos, name: city.name, kind: 'seed', until: game.now + 40 };
+    feed(`🌰 ¡Lluvia de semillas en <b>${city.name}</b>!`); banner(`🌰 Lluvia de semillas en ${city.name}`);
   }
   if (game.state === 'play') sfx.event();
 }
@@ -775,6 +1008,7 @@ function houseRules(h) {
     const max = h.home.rad - 0.1 - h.r * 0.6;
     if (d > max) moveOnSphere(h.pos, dirTo(h.pos, h.home.pos, _v2), d - max);
   } else if (d > h.home.rad + h.r + 0.2) {
+    game.cleanups.push({ objs: h.home.objs, at: game.now + 25 });
     h.home = null; h.shield = 2.5;
     if (h === player) { banner('🌆 ¡Libre! Ahora a cubrir la ciudad de selva'); sfx.level(); }
   }
@@ -791,6 +1025,13 @@ function tick() {
 
   if (playing && player.alive) readPlayerInput();
   population(dt);
+  paintAll(dt);
+  sweep();
+  humans(dt);
+  updateOutposts(dt);
+  fireStep(dt, game.now);
+  upload(dt, MOBILE ? 0.2 : 0.1);
+  cleanups();
   worldScale(dt);
   resolveAsk();
   socialT -= dt; if (socialT <= 0) { socialT = 2.5; botSocial(); }
@@ -800,6 +1041,7 @@ function tick() {
     if (h === player) continue;
     if (!h.alive) {
       if (game.now > h.respawnAt) {
+        h.score = 0;
         const mate = h.team && h.team.members.find((m) => m !== h && m.alive && !m.home);
         if (mate) { h.spawnAt(offsetPoint(mate.pos, mate.r + 4, Math.random() * 7)); h.home = world.buildHome(h.pos, game.now); }
         else spawnInHome(h);
@@ -820,6 +1062,8 @@ function tick() {
         h.ai.aim = null;
       }
     }
+    // plantar brotes en tierra ajena o libre
+    if (!h.ai.aim && !h.ai.fleeing && h.bombs > 0 && h.r > 0.4 && !h.home && Math.random() < dt * 0.06) throwBomb(h, h.dir);
   }
 
   let leader = null;
@@ -827,14 +1071,16 @@ function tick() {
     if (!h.alive) continue;
     updateCamo(h, dt);
     if (!h.solid()) h.boost = false;
-    if (h.boost && h.A > 0.36) h.setArea(h.A - h.A * 0.03 * dt); else h.boost = false;
-    if (h.r > 8) h.setArea(h.A - dt * h.A * 0.02 * (h.r - 8) / 8); // evaporación de gigantes
+    if (h.boost && h.A > 0.36 && h.bio > 0.05) h.addBio(-h.A * 0.03 * dt); else h.boost = false;
+    h.recalc(area[h.id]);
+    h.score += dt * area[h.id] * 0.05;
+    if (h === player) player.bestT = Math.max(player.bestT || 0, landPct(player));
     h.stun = Math.max(0, h.stun - dt); h.shield = Math.max(0, h.shield - dt); h.rush = Math.max(0, h.rush - dt);
     h.comboT -= dt; if (h.comboT <= 0) h.combo = 0;
     const sv = h.siege > 0 ? 0.75 : 1;
     moveOnSphere(h.pos, h.dir, h.speed() * h.throttle * sv * dt);
     houseRules(h);
-    if (h.solid()) eatObjects(h);
+    if (h.solid()) eatObjects(h, dt);
     h.bestR = Math.max(h.bestR, h.r);
     if (!leader || h.r > leader.r) leader = h;
   }
@@ -873,6 +1119,7 @@ function tick() {
   const vis = holes.filter((h) => h.alive && (h.camo !== 'hidden' || h === player)).sort((a, b) => b.r - a.r).slice(0, MAX_HOLES);
   for (const h of vis) { h.fxAlpha = h === player ? Math.max(0.22, h.alpha()) : h.alpha(); h.fxWarn = h.camo === 'reveal' || h.siege > 0 ? 1 : 0; }
   globe.setHoles(vis);
+  trees(dt);
   globe.uniforms.time.value = game.now;
 
   updateCamera(dt);
@@ -966,9 +1213,10 @@ function updateLabels() {
       const color = mate ? '#4da3ff' : h.r > player.r * HOLE_RATIO ? '#ff4d4d' : player.r > h.r * HOLE_RATIO ? '#5dff8f' : '#ffffff';
       addArrow(h.pos, h.camo === 'reveal' ? '#ff4d4d' : color, `${mate ? h.name + ' ' : h.camo === 'reveal' ? '⚠️ ' : ''}${Math.round(d)} m`);
     }
-    if (game.event && game.event.city) {
-      const d = surfDist(player.pos, game.event.city.pos);
-      if (d > 6) addArrow(game.event.city.pos, game.event.kind === 'bomb' ? '#ff7a5a' : '#6ec6ff', `${game.event.kind === 'bomb' ? '🔥' : '💧'} ${game.event.city.name} ${Math.round(d)} m`);
+    if (game.event && game.event.pos) {
+      const e = game.event, d = surfDist(player.pos, e.pos);
+      const ic = e.kind === 'fire' ? '🔥' : e.kind === 'seed' ? '🌰' : '💧';
+      if (d > 6) addArrow(e.pos, e.kind === 'fire' ? '#ff7a2f' : e.kind === 'seed' ? '#e0b070' : '#6ec6ff', `${ic} ${e.name} ${Math.round(d)} m`);
     }
   }
   for (let i = ai; i < arrowEls.length; i++) arrowEls[i].style.display = 'none';
@@ -976,5 +1224,5 @@ function updateLabels() {
 
 requestAnimationFrame(tick);
 for (let i = 0; i < 16; i++) connectBot(true, true);
-window.__tm = { game, player, holes, world, teams, teamUp };
+window.__tm = { game, player, holes, world, teams, teamUp, T: { sampleOwned, ignite, idxOf } };
 window.__proj = (p) => { const v = new THREE.Vector3(p.x, p.y, p.z).multiplyScalar(R); return toScreen(v); };

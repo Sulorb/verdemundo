@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { R, CITIES, surfDist, dirTo, tangentize, offsetPoint, randomLand, isLand } from './geo.js';
+import { grid, idxOf, ASH } from './territory.js';
 
 export const START_R = 0.14;
 export const START_A = START_R * START_R;
@@ -11,6 +12,7 @@ export const WALL_R = 0.33; // tamaño para romper las paredes de la casa
 export const CAMO = { charge: 60, fade: 8, hidden: 30, reveal: 8 };
 export const TEAM_MAX = 3;
 export const PACK = { touch: 0.5, need: 0.75, time: 2.5 }; // cacería en manada
+export const TERR_K = 0.012; // cuánto tamaño da cada unidad² de territorio
 
 export const TITLES = [
   [0, 'Brote'], [0.3, 'Musgo'], [0.6, 'Matorral'], [1.2, 'Huerto'], [2.2, 'Arboleda'], [3.8, 'Bosque'], [6, 'Selva'], [9, 'Jungla Ancestral'], [13, 'Gaia'],
@@ -38,6 +40,7 @@ export class Hole {
     this.kills = 0; this.eaten = 0; this.splits = 0; this.deaths = 0; this.packs = 0;
     this.landmarks = [];
     this.bombs = 0;
+    this.bio = 0; this.ep = 0; this.terr = 0; this.trucks = 0; this.outposts = 0;
     this.setArea(START_A);
     this.stun = 0; this.rush = 0; this.boost = false; this.throttle = 1; this.bombCd = 0; this.shield = 0;
     this.combo = 0; this.comboT = 0;
@@ -63,9 +66,15 @@ export class Hole {
     return 1;
   }
   setArea(A) { this.A = Math.max(START_A * 0.8, A); this.r = Math.sqrt(this.A); }
+  /** El tamaño sale de la biomasa (lo enredado) más el territorio */
+  addBio(x) { this.bio = Math.max(0, this.bio + x); }
+  recalc(terrArea) { this.terr = terrArea; this.setArea(START_A + this.bio + terrArea * TERR_K); }
   speed() {
     // chiquito = lento en absoluto (pero rápido para su tamaño); grande = lento
     let v = Math.min(9.5 / (1 + 0.075 * this.r), 1.3 + this.r * 6.2);
+    // en tus raíces corrés; en las ajenas te enredás; en el mar flotás lento
+    const g = grid[idxOf(this.pos)];
+    if (g === this.id) v *= 1.2; else if (g > 0 && g < ASH) v *= 0.85; else if (!isLand(this.pos)) v *= 0.85;
     if (this.boost) v *= 1.65;
     if (this.stun > 0) v *= 0.3;
     if (this.rush > 0) v *= 1.35;
@@ -77,7 +86,7 @@ export class Hole {
   spawnAt(p, A = START_A) {
     this.pos.copy(p).normalize();
     this.dir.set(0, 1, 0); tangentize(this.dir, this.pos);
-    this.setArea(A); this.alive = true; this.bombs = 0; this.combo = 0; this.stun = 0; this.shield = 3;
+    this.bio = Math.max(0, A - START_A); this.setArea(A); this.alive = true; this.bombs = 0; this.combo = 0; this.stun = 0; this.shield = 3;
     this.camo = 'none'; this.camoT = 0; this.home = null; this.siege = 0; this.siegeTeam = null;
   }
 }
@@ -179,18 +188,29 @@ export function thinkBot(h, game) {
   const look = Math.min(9 + h.r * 3, 1.2 + h.r * 10);
   world.query(h.pos, look, (o) => {
     if (!o.alive) return;
+    if (o.over && o.owner === h) return;
     if (inHouse && surfDist(h.home.pos, o.pos) > h.home.rad - 0.05) return;
     let v;
-    if (o.kind === 'bomb') { if (h.bombs >= 3) return; v = 0.5 * ai.aggr * Math.min(1, h.r); }
+    if (o.kind === 'seed') { if (h.bombs >= 3) return; v = 0.5 * ai.aggr * Math.min(1, h.r); }
     else {
       if (o.s > h.r * EAT_RATIO) return;
       v = o.s * o.s * (o.kind === 'gold' ? 6 : o.landmark ? 3 : o.kind === 'wall' ? 2 : 1) * ai.greed;
-      if (o.kind === 'debris') v *= 2;
+      if (o.over) v *= 0.7; // robarle a otra selva
     }
     const d = surfDist(h.pos, o.pos);
     const sc = v / (d + 0.3 + h.r);
     if (sc > bestScore) { bestScore = sc; bestPos = o.pos; bestHole = null; }
   });
+
+  // leñadores en tu tierra: a enredarlos
+  if (h.r > 0.5 && game.trucks) for (const t of game.trucks) {
+    if (t.dead) continue;
+    const d = surfDist(h.pos, t.pos);
+    if (d > look * 1.5) continue;
+    const mine = t.target === h.id ? 3 : 1;
+    const sc = (0.25 * mine * ai.greed) / (d + 0.3 + h.r);
+    if (sc > bestScore) { bestScore = sc; bestPos = t.pos; bestHole = null; }
+  }
 
   if (pack) {
     // rodear el borde de la presa sin meterse
@@ -204,9 +224,18 @@ export function thinkBot(h, game) {
     if (lead && surfDist(h.pos, lead.pos) > 6 + lead.r * 2) ai.wander = lead.pos;
     else if (event && event.city && surfDist(h.pos, event.city.pos) < R) ai.wander = event.city.pos;
     else if (!ai.wander || now > ai.wanderT || surfDist(h.pos, ai.wander) < 1 + h.r) {
+      // buscar tierra que no sea suya para echarle raíces
+      let best = null, bs = -1;
+      for (let t = 0; t < 10; t++) {
+        const q = offsetPoint(h.pos, 3 + h.r * (3 + Math.random() * 6), Math.random() * 7);
+        if (!isLand(q)) continue;
+        const g = grid[idxOf(q)];
+        const sc = (g === h.id ? 0.1 : g > 0 && g < ASH ? 1.3 * ai.aggr + 0.3 : 1) + Math.random() * 0.3;
+        if (sc > bs) { bs = sc; best = q; }
+      }
       const c = CITIES[Math.floor(Math.random() * CITIES.length)];
-      ai.wander = surfDist(h.pos, c.pos) < R * 0.8 && h.r > 0.5 ? c.pos : offsetPoint(h.pos, 3 + h.r * 10, Math.random() * 7);
-      ai.wanderT = now + 25;
+      ai.wander = best || (surfDist(h.pos, c.pos) < R * 0.8 && h.r > 0.5 ? c.pos : offsetPoint(h.pos, 3 + h.r * 10, Math.random() * 7));
+      ai.wanderT = now + 6 + Math.random() * 6;
     }
     dirTo(h.pos, ai.wander, des);
   }
